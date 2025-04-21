@@ -6,12 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 )
 
 func (app *application) executeHandler(w http.ResponseWriter, r *http.Request) {
@@ -37,7 +37,7 @@ func (app *application) executeHandler(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := cli.ContainerCreate(ctx, &container.Config{
 		Image:        "golang:1.21",
-		Cmd:          []string{"sh", "-c", "go run main.go"},
+		Cmd:          []string{"go", "run", "main.go"},
 		WorkingDir:   "/app",
 		Tty:          false,
 		AttachStdout: true,
@@ -102,8 +102,6 @@ func (app *application) executeHandler(w http.ResponseWriter, r *http.Request) {
 	logs, err := cli.ContainerLogs(ctx, resp.ID, container.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
-		Follow:     false,
-		Timestamps: false,
 	})
 	if err != nil {
 		app.errorResponse(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to get container logs: %v", err))
@@ -111,7 +109,8 @@ func (app *application) executeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer logs.Close()
 
-	output, err := io.ReadAll(logs)
+	stdCopyBuf := new(bytes.Buffer)
+	_, err = stdcopy.StdCopy(stdCopyBuf, stdCopyBuf, logs)
 	if err != nil {
 		app.errorResponse(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to read container logs: %v", err))
 		return
@@ -119,7 +118,7 @@ func (app *application) executeHandler(w http.ResponseWriter, r *http.Request) {
 
 	response := map[string]string{
 		"status": "success",
-		"output": string(output),
+		"output": stdCopyBuf.String(),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
