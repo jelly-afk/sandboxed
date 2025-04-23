@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -22,17 +21,9 @@ type application struct {
 	logger *log.Logger
 }
 
-// errorResponse is a helper for sending JSON-formatted error messages
-func (app *application) errorResponse(w http.ResponseWriter, r *http.Request, status int, message interface{}) {
-	env := envelope{"error": message}
-
-	err := json.NewEncoder(w).Encode(env)
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-	}
+func (app *application) errorResponse(w http.ResponseWriter, r *http.Request, status int, message string) {
+	http.Error(w, http.StatusText(status), status)
 }
-
-type envelope map[string]interface{}
 
 func main() {
 	var cfg config
@@ -46,12 +37,12 @@ func main() {
 	}
 	srv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.port),
-		Handler:      app.routes(),
+		Handler:      app.logRequest(app.routes()),
 		IdleTimeout:  time.Minute,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
-	logger.Printf("starting %s server on %s", cfg.env, srv.Addr)
+	logger.Printf("[INFO] Starting %s server on %s", cfg.env, srv.Addr)
 	err := srv.ListenAndServe()
 	logger.Fatal(err)
 }

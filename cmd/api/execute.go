@@ -2,17 +2,15 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"context"
-	"io"
 	"net/http"
-	"time"
 
 	"fmt"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/gorilla/websocket"
 )
 
@@ -20,7 +18,7 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins for now
+		return true 
 	},
 }
 
@@ -52,8 +50,7 @@ func (app *application) executeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cli.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	ctx := context.Background()
 
 	resp, err := cli.ContainerCreate(ctx, &container.Config{
 		Image:        "golang:1.21",
@@ -114,75 +111,41 @@ func (app *application) executeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	fmt.Println("container started")
 
-	// Start streaming logs
-	reader, err := cli.ContainerLogs(ctx, resp.ID, container.LogsOptions{
-		ShowStdout: true,
-		ShowStderr: true,
-		Follow:     true,
-		Timestamps: false,
-	})
-	if err != nil {
-		app.logger.Printf("[ERROR] Failed to get container logs: %v", err)
-		conn.WriteMessage(websocket.CloseMessage, []byte(http.StatusText(http.StatusInternalServerError)))
-		return
-	}
-	defer reader.Close()
-
-	// Create a channel to signal when the container is done
 	done := make(chan struct{})
+
+	go func() {
+		reader, err := cli.ContainerLogs(ctx, resp.ID, container.LogsOptions{
+			ShowStdout: true,
+			ShowStderr: true,
+			Follow:     true,
+			Timestamps: false,
+		})
+		if err != nil {
+			app.logger.Printf("[ERROR] Failed to get container logs: %v", err)
+			conn.WriteMessage(websocket.CloseMessage, []byte(http.StatusText(http.StatusInternalServerError)))
+			return
+		}
+		defer reader.Close()
+		scanner := bufio.NewScanner(reader)
+		for scanner.Scan() {
+			if err := conn.WriteJSON(scanner.Text()); err != nil {
+				app.logger.Printf("[ERROR] Failed to write to websocket: %v", err)
+				return
+			}
+		}
+		close(done)
+	}()
+
 	go func() {
 		statusCh, errCh := cli.ContainerWait(ctx, resp.ID, container.WaitConditionNotRunning)
 		select {
 		case err := <-errCh:
 			if err != nil {
-				app.logger.Printf("[ERROR] Container wait failed: %v", err)
-				conn.WriteMessage(websocket.CloseMessage, []byte(http.StatusText(http.StatusInternalServerError)))
+				app.logger.Printf("[ERROR] Container wait error: %v", err)
 			}
 		case <-statusCh:
-			app.logger.Printf("[INFO] Container completed successfully")
-		case <-ctx.Done():
-			app.logger.Printf("[ERROR] Execution timed out")
-			conn.WriteMessage(websocket.CloseMessage, []byte(http.StatusText(http.StatusRequestTimeout)))
 		}
-		close(done)
 	}()
 
-	// Create buffers for stdout and stderr
-	stdout := new(bytes.Buffer)
-	stderr := new(bytes.Buffer)
-
-	// Stream logs to WebSocket
-	for {
-		select {
-		case <-done:
-			return
-		default:
-			_, err := stdcopy.StdCopy(stdout, stderr, reader)
-			if err != nil {
-				if err != io.EOF {
-					app.logger.Printf("[ERROR] Failed to read logs: %v", err)
-					conn.WriteMessage(websocket.CloseMessage, []byte(http.StatusText(http.StatusInternalServerError)))
-				}
-				return
-			}
-
-			if stdout.Len() > 0 {
-				err := conn.WriteMessage(websocket.TextMessage, stdout.Bytes())
-				fmt.Println("stdout", stdout.Bytes())
-				if err != nil {
-					app.logger.Printf("[ERROR] Failed to write to websocket: %v", err)
-					return
-				}
-				stdout.Reset()
-			}
-
-			if stderr.Len() > 0 {
-				if err := conn.WriteMessage(websocket.TextMessage, stderr.Bytes()); err != nil {
-					app.logger.Printf("[ERROR] Failed to write to websocket: %v", err)
-					return
-				}
-				stderr.Reset()
-			}
-		}
-	}
+	<-done
 }

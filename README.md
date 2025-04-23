@@ -43,4 +43,3 @@ The server will:
 ## Configuration
 
 - `-port`: Server port (default: 4000)
-- `-env`: Environment (development|staging|production)
